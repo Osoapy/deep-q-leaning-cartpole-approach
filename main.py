@@ -5,6 +5,9 @@ import torch.nn as nn
 import torch.optim as optim
 import gymnasium as gym
 from collections import deque
+import matplotlib.pyplot as plt
+import seaborn as sns
+import time
 import os
 
 # --- Configuração de dispositivo ---
@@ -12,10 +15,10 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # --- 1. Configurações básicas ---
 env = gym.make("CartPole-v1", render_mode="none")
-state_size = env.observation_space.shape[0]  # 4
-action_size = env.action_space.n             # 2
+state_size = env.observation_space.shape[0]
+action_size = env.action_space.n
 
-# Hiperparâmetros (ajusta se quiser)
+# Hiperparâmetros
 gamma = 0.99
 epsilon = 1.0
 epsilon_min = 0.01
@@ -23,9 +26,8 @@ epsilon_decay = 0.995
 lr = 1e-3
 batch_size = 64
 memory = deque(maxlen=20000)
-target_update_freq = 2       # atualizar target_net a cada N episódios
-max_episodes = 10000         # limite alto por segurança
-solved_score = 495.0         # média móvel de 100 episódios considerada "perfeita"
+target_update_freq = 2
+max_episodes = 10000
 save_path = "dqn_cartpole_perfeito.pth"
 
 # --- 2. Rede Neural ---
@@ -50,7 +52,6 @@ optimizer = optim.Adam(policy_net.parameters(), lr=lr)
 
 # --- Funções auxiliares ---
 def act(state, epsilon):
-    """ε-greedy action selection"""
     if random.random() <= epsilon:
         return random.randrange(action_size)
     state_t = torch.FloatTensor(state).unsqueeze(0).to(device)
@@ -59,7 +60,6 @@ def act(state, epsilon):
         return int(torch.argmax(q_values, dim=1).item())
 
 def replay():
-    """Treinamento com amostra do replay buffer"""
     if len(memory) < batch_size:
         return None
     minibatch = random.sample(memory, batch_size)
@@ -71,10 +71,8 @@ def replay():
     next_states_t = torch.FloatTensor(next_states).to(device)
     dones_t = torch.FloatTensor(dones).to(device)
 
-    # Q(s,a) atual
     q_values = policy_net(states_t).gather(1, actions_t.unsqueeze(1)).squeeze(1)
 
-    # Q_target = r + gamma * max_a' Q_target(s', a') * (1 - done)
     with torch.no_grad():
         next_q_values = target_net(next_states_t).max(1)[0]
     targets = rewards_t + (gamma * next_q_values * (1 - dones_t))
@@ -83,19 +81,19 @@ def replay():
 
     optimizer.zero_grad()
     loss.backward()
-    # clipping de gradiente pra estabilidade
     nn.utils.clip_grad_norm_(policy_net.parameters(), 10)
     optimizer.step()
 
     return loss.item()
 
-# --- Loop de treinamento até "perfeição" ---
-episode_rewards = deque(maxlen=100)  # pra média móvel de 100 episódios
-
+# --- Loop de treinamento ---
+episode_rewards = []
+avg_rewards = []
+losses = []
+perfect_episodes = 0
 episode = 0
-best_avg = -np.inf
 
-while episode < max_episodes:
+while episode < max_episodes and perfect_episodes < 25:
     episode += 1
     state, _ = env.reset()
     total_reward = 0.0
@@ -110,11 +108,13 @@ while episode < max_episodes:
         state = next_state
         total_reward += reward
 
-        replay()
+        loss = replay()
+        if loss is not None:
+            losses.append(loss)
 
     # pós-episódio
     episode_rewards.append(total_reward)
-    avg_reward = np.mean(episode_rewards)
+    avg_rewards.append(np.mean(episode_rewards[-100:]))
 
     # decai epsilon
     if epsilon > epsilon_min:
@@ -124,23 +124,60 @@ while episode < max_episodes:
     if episode % target_update_freq == 0:
         target_net.load_state_dict(policy_net.state_dict())
 
-    # salvar modelo quando melhora média
-    if avg_reward > best_avg:
-        best_avg = avg_reward
-        torch.save(policy_net.state_dict(), save_path)
+    # checa se foi um episódio perfeito
+    if total_reward >= 500:
+        perfect_episodes += 1
+        print(f"🏆 Episódio {episode} atingiu pontuação máxima! ({perfect_episodes}/25)")
+    else:
+        perfect_episodes = max(perfect_episodes - 0.1, 0)  # evita estagnar
 
-    # logs úteis
-    print(f"Eps {episode:4d} | Rew {total_reward:6.1f} | Avg100 {avg_reward:6.2f} | EpsGreedy {epsilon:.3f}")
+    print(f"Eps {episode:4d} | Rew {total_reward:6.1f} | Avg100 {avg_rewards[-1]:6.2f} | EpsGreedy {epsilon:.3f}")
 
-    # Condição de parada: média móvel de 100 episódios >= solved_score
-    if len(episode_rewards) == 100 and avg_reward >= solved_score:
-        print(f"\n🟢 PARABÉNS — atingido avg100 >= {solved_score:.1f} em {episode} episódios.")
-        print(f"Modelo salvo em: {os.path.abspath(save_path)}")
-        break
-
-# caso não consiga atingir nos max_episodes
-if episode >= max_episodes:
-    print(f"\n🔴 Atingido limite de episódios ({max_episodes}). Melhor avg100 registrada: {best_avg:.2f}")
-    print(f"Modelo do melhor checkpoint salvo em: {os.path.abspath(save_path)}")
-
+# --- Após 25 episódios perfeitos ---
+print(f"\n✅ Treinamento concluído após {episode} episódios ({perfect_episodes:.0f}/25 perfeitos).")
+torch.save(policy_net.state_dict(), save_path)
 env.close()
+
+# --- Teste gráfico ---
+env = gym.make("CartPole-v1", render_mode="human")
+state, _ = env.reset()
+done = False
+total_reward = 0
+
+print("\n🎬 Mostrando agente final aprendendo em tempo real...")
+input("Pressione Enter para iniciar...")
+while not done:
+    time.sleep(0.05)  # controla a velocidade da simulação
+    action = act(state, epsilon=0.0)  # sempre greedy agora
+    state, reward, terminated, truncated, _ = env.step(action)
+    total_reward += reward
+    done = terminated or truncated
+
+print(f"\nPontuação final do agente treinado: {total_reward}")
+env.close()
+
+# --- Gráficos de desempenho ---
+plt.figure(figsize=(14, 6))
+
+plt.subplot(1, 3, 1)
+plt.plot(episode_rewards, label="Recompensa por episódio", alpha=0.7)
+plt.plot(avg_rewards, label="Média móvel (100)", color='red')
+plt.title("Evolução da Recompensa")
+plt.xlabel("Episódio")
+plt.ylabel("Recompensa")
+plt.legend()
+
+plt.subplot(1, 3, 2)
+plt.plot(losses, label="Loss", color="purple", alpha=0.7)
+plt.title("Evolução da Perda (Loss)")
+plt.xlabel("Batch")
+plt.ylabel("Loss")
+plt.legend()
+
+plt.subplot(1, 3, 3)
+weights = policy_net.fc1.weight.detach().cpu().numpy()
+sns.heatmap(weights, cmap="coolwarm", cbar=True)
+plt.title("Heatmap dos Pesos da Primeira Camada")
+
+plt.tight_layout()
+plt.show()
