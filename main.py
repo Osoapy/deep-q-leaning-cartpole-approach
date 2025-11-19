@@ -25,8 +25,9 @@ epsilon_min = 0.01
 epsilon_decay = 0.995
 lr = 1e-3
 batch_size = 64
-memory = deque(maxlen=20000)
+memory = deque(maxlen=100000)
 target_update_freq = 2
+print_freq = 25
 max_episodes = 10000
 save_path = "dqn_cartpole_perfeito.pth"
 
@@ -65,16 +66,18 @@ def replay():
     minibatch = random.sample(memory, batch_size)
     states, actions, rewards, next_states, dones = zip(*minibatch)
 
-    states_t = torch.FloatTensor(states).to(device)
-    actions_t = torch.LongTensor(actions).to(device)
-    rewards_t = torch.FloatTensor(rewards).to(device)
-    next_states_t = torch.FloatTensor(next_states).to(device)
-    dones_t = torch.FloatTensor(dones).to(device)
+    states_t = torch.FloatTensor(np.array(states)).to(device)
+    actions_t = torch.LongTensor(np.array(actions)).to(device)
+    rewards_t = torch.FloatTensor(np.array(rewards)).to(device)
+    next_states_t = torch.FloatTensor(np.array(next_states)).to(device)
+    dones_t = torch.FloatTensor(np.array(dones)).to(device)
 
     q_values = policy_net(states_t).gather(1, actions_t.unsqueeze(1)).squeeze(1)
 
     with torch.no_grad():
-        next_q_values = target_net(next_states_t).max(1)[0]
+        next_actions = policy_net(next_states_t).argmax(1)  # escolhe ação com policy
+        next_q_values = target_net(next_states_t).gather(1, next_actions.unsqueeze(1)).squeeze(1)  # avalia no target
+
     targets = rewards_t + (gamma * next_q_values * (1 - dones_t))
 
     loss = nn.MSELoss()(q_values, targets)
@@ -88,12 +91,12 @@ def replay():
 
 # --- Loop de treinamento ---
 episode_rewards = []
-avg_rewards = []
+avg_rewards = [0.0]
 losses = []
 perfect_episodes = 0
 episode = 0
 
-while episode < max_episodes and perfect_episodes < 25:
+while avg_rewards[-1] < 450 and episode < max_episodes:
     episode += 1
     state, _ = env.reset()
     total_reward = 0.0
@@ -127,11 +130,10 @@ while episode < max_episodes and perfect_episodes < 25:
     # checa se foi um episódio perfeito
     if total_reward >= 500:
         perfect_episodes += 1
-        print(f"🏆 Episódio {episode} atingiu pontuação máxima! ({perfect_episodes}/25)")
-    else:
-        perfect_episodes = max(perfect_episodes - 0.1, 0)  # evita estagnar
 
-    print(f"Eps {episode:4d} | Rew {total_reward:6.1f} | Avg100 {avg_rewards[-1]:6.2f} | EpsGreedy {epsilon:.3f}")
+    # imprime progresso
+    if episode % print_freq == 0:
+        print(f"📊 Eps {episode} | Rew: {total_reward:.2f} | Avg(100): {avg_rewards[-1]:.2f} | Epsilon: {epsilon:.3f}")
 
 # --- Após 25 episódios perfeitos ---
 print(f"\n✅ Treinamento concluído após {episode} episódios ({perfect_episodes:.0f}/25 perfeitos).")
